@@ -25,7 +25,7 @@ import numpy as np
 CONFIDENT = 0.55   # >= this: tagged automatically
 BORDERLINE = 0.38  # >= this: sent to the review queue
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 THUMB_SIZE = 160
 MIN_DET_SCORE = 0.50
 MIN_FACE_PX = 36
@@ -98,6 +98,13 @@ def cmd_scan(args):
         if known.get(str(path)) == mtime:
             continue
         img = cv2.imread(str(path))
+        if img is None:  # formats OpenCV can't decode (e.g. avif) — try Pillow
+            try:
+                from PIL import Image
+                img = cv2.cvtColor(np.asarray(Image.open(path).convert("RGB")),
+                                   cv2.COLOR_RGB2BGR)
+            except Exception:
+                img = None
         if img is None:
             print(f"  ! unreadable, skipped: {path}")
             continue
