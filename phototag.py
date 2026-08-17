@@ -442,6 +442,21 @@ def cmd_serve(args):
             "ORDER BY source='manual' DESC, score DESC LIMIT 200", (name,))
         return jsonify([dict(r) for r in rows])
 
+    @flask_app.post("/api/rename")
+    def rename():
+        a = request.get_json()
+        old, new = a.get("old", "").strip(), a.get("new", "").strip()
+        if not old or not new:
+            return jsonify({"error": "empty name"}), 400
+        with lock:
+            db.execute("UPDATE faces SET person=? WHERE person=?", (new, old))
+            # merge rejection rows, dropping ones that would collide
+            db.execute("UPDATE OR IGNORE rejections SET person=? WHERE person=?",
+                       (new, old))
+            db.execute("DELETE FROM rejections WHERE person=?", (old,))
+            refresh()
+        return jsonify({"ok": True})
+
     @flask_app.post("/api/action")
     def action():
         a = request.get_json()
@@ -494,9 +509,25 @@ PERSON_PAGE = """<!doctype html><meta charset="utf-8"><title>__NAME__ — photot
  .cap{margin-top:6px;word-break:break-all}
  .badge{font-size:11px;background:#2b3542;border-radius:4px;padding:1px 6px;margin-left:6px}
 </style>
-<header><a href="/">← all people</a><h1>__NAME__</h1>
+<header><a href="/">← all people</a>
+ <h1 id=pname title="double-click to rename" style="cursor:text">__NAME__</h1>
  <span class=muted>__COUNT__ photos</span></header>
-<section>__CARDS__</section>"""
+<section>__CARDS__</section>
+<script>
+const el=document.getElementById('pname'), orig=el.textContent;
+el.ondblclick=()=>{el.contentEditable=true;el.focus();
+ getSelection().selectAllChildren(el)};
+el.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();el.blur()}
+ else if(e.key==='Escape'){el.textContent=orig;el.blur()}};
+el.onblur=async()=>{el.contentEditable=false;
+ const n=el.textContent.trim();
+ if(!n||n===orig){el.textContent=orig;return}
+ const r=await fetch('/api/rename',{method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({old:orig,new:n})});
+ if(r.ok)location.href='/person/'+encodeURIComponent(n);
+ else el.textContent=orig};
+</script>"""
 
 
 PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
