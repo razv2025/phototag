@@ -381,7 +381,7 @@ def cmd_serve(args):
                     "person IS NOT NULL AND source IN ('manual','auto')"):
                 photos[r["photo_id"]]["persons"].add(r["person"])
         out = [{**p, "persons": sorted(p["persons"])} for p in photos.values()
-               if (p["persons"] == want if exclusive else
+               if (bool(want) and p["persons"] == want if exclusive else
                    want <= p["persons"] and not (avoid & p["persons"]))]
         out.sort(key=lambda p: p["name"])
         return jsonify(out)
