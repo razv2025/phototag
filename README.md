@@ -25,10 +25,11 @@ On Windows use `.venv\Scripts\pip` / `.venv\Scripts\python` instead of
 # 1. Index all faces (JPG/PNG, recursive; cached — re-runs only touch new/changed photos)
 .venv/bin/python phototag.py scan ~/path/to/photos
 
-# 2. Label & review in the browser (opens automatically)
+# 2. Label & review in the browser (opens automatically);
+#    each person's name links to their own page with all their photos
 .venv/bin/python phototag.py serve
 
-# 3. Build one folder per person with links to their photos
+# 3. (optional) Also build one folder per person on disk
 .venv/bin/python phototag.py export ~/Desktop/tagged
 # on Windows, or if you want real files instead of symlinks:
 .venv/bin/python phototag.py export ~/Desktop/tagged --copy
@@ -49,9 +50,9 @@ time only, after that everything works offline.
   Every answer triggers a re-classification, so the queue shrinks as you go.
 - **People** — per-person counts and faces (✓ = manually confirmed,
   % = auto-match score). The ✗ button un-tags a wrong auto-match, which also
-  teaches the matcher.
-- **Export** — same as the CLI `export`; only confirmed + confident-auto
-  matches are exported, never unreviewed borderline ones.
+  teaches the matcher. Click a person's name to open **their page**: every
+  photo they appear in (confirmed + confident matches only, never unreviewed
+  borderline ones), full-size on click.
 
 ## Tuning
 
