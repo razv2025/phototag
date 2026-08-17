@@ -324,6 +324,39 @@ def cmd_serve(args):
                          "WHERE f.id=?", (face_id,)).fetchone()
         return send_file(row["path"])
 
+    @flask_app.get("/person/<name>")
+    def person_page(name):
+        import html as html_mod
+        with lock:
+            rows = db.execute("""
+                SELECT f.id face_id, f.source, f.score, p.id photo_id, p.path
+                FROM faces f JOIN photos p ON p.id=f.photo_id
+                WHERE f.person=? AND f.ignored=0 AND f.source IN ('manual','auto')
+                ORDER BY p.path""", (name,)).fetchall()
+        photos = {}
+        for r in rows:
+            ph = photos.setdefault(r["photo_id"], {
+                "path": r["path"], "face_id": r["face_id"],
+                "confirmed": False, "score": 0.0})
+            if r["source"] == "manual":
+                ph["confirmed"] = True
+            else:
+                ph["score"] = max(ph["score"], r["score"] or 0.0)
+        cards = []
+        for ph in photos.values():
+            fname = html_mod.escape(Path(ph["path"]).name)
+            badge = ("✓ confirmed" if ph["confirmed"]
+                     else f"{int(ph['score'] * 100)}% match")
+            cards.append(
+                f'<div class=card><a href="/photo/{ph["face_id"]}" target=_blank>'
+                f'<img src="/photo/{ph["face_id"]}"></a>'
+                f'<div class=cap>{fname} <span class=badge>{badge}</span></div></div>')
+        return (PERSON_PAGE
+                .replace("__NAME__", html_mod.escape(name))
+                .replace("__COUNT__", str(len(photos)))
+                .replace("__CARDS__", "".join(cards) or
+                         '<p class=muted>no photos yet</p>'))
+
     @flask_app.get("/api/person/<name>")
     def person_faces(name):
         rows = db.execute(
@@ -360,9 +393,6 @@ def cmd_serve(args):
             elif kind == "ignore_face":
                 db.execute("UPDATE faces SET person=NULL, source=NULL, ignored=1 "
                            "WHERE id=?", (a["face_id"],))
-            elif kind == "export":
-                counts = export_links(db, Path(a["out"]).expanduser().resolve())
-                return jsonify({"exported": counts})
             refresh()
             return jsonify(build_state(db))
 
@@ -372,6 +402,23 @@ def cmd_serve(args):
     threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     print(f"phototag UI on {url}  (Ctrl-C to stop)")
     flask_app.run(port=args.port, debug=False)
+
+
+PERSON_PAGE = """<!doctype html><meta charset="utf-8"><title>__NAME__ — phototag</title>
+<style>
+ body{font:14px -apple-system,sans-serif;margin:0;background:#101418;color:#e8eaed}
+ header{position:sticky;top:0;background:#1a2027;padding:10px 16px;display:flex;
+        gap:16px;align-items:center;box-shadow:0 1px 4px #0008}
+ h1{font-size:16px;margin:0} a{color:#7ab8f5;text-decoration:none} .muted{color:#889}
+ section{padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px}
+ .card{background:#1a2027;border-radius:10px;padding:8px;max-width:340px}
+ .card img{max-height:240px;max-width:320px;border-radius:6px;display:block}
+ .cap{margin-top:6px;word-break:break-all}
+ .badge{font-size:11px;background:#2b3542;border-radius:4px;padding:1px 6px;margin-left:6px}
+</style>
+<header><a href="/">← all people</a><h1>__NAME__</h1>
+ <span class=muted>__COUNT__ photos</span></header>
+<section>__CARDS__</section>"""
 
 
 PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
@@ -391,11 +438,9 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
  input,select{background:#0d1116;color:#e8eaed;border:1px solid #333;border-radius:6px;
         padding:5px 8px} .score{color:#8fb573;font-weight:600}
  .badge{font-size:11px;background:#2b3542;border-radius:4px;padding:1px 6px;margin-left:6px}
+ a.plink{color:#7ab8f5;text-decoration:none} a.plink:hover{text-decoration:underline}
 </style>
-<header><h1>phototag</h1><span id=stats class=muted></span>
- <span style="flex:1"></span>
- <input id=exportPath placeholder="export folder e.g. ~/Desktop/tagged" size=30>
- <button onclick="doExport()">Export symlinks</button></header>
+<header><h1>phototag</h1><span id=stats class=muted></span></header>
 <section id=people></section>
 <section id=review class=review></section>
 <section id=clusters></section>
@@ -405,7 +450,6 @@ const $=id=>document.getElementById(id);
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify(a)})).json();
-  if(S.exported){alert('Exported photos per person: '+JSON.stringify(S.exported));refresh();return}
   render()}
 async function refresh(){S=await (await fetch('/api/state')).json();render()}
 function img(id){return `<img src="/thumb/${id}" onclick="window.open('/photo/${id}')" title="click: full photo">`}
@@ -413,7 +457,7 @@ function personOptions(){return S.persons.map(p=>`<option>${esc(p.name)}</option
 function render(){
  $('stats').textContent=`${S.totals.photos} photos · ${S.totals.faces} faces`;
  $('people').innerHTML='<h2>People</h2>'+(S.persons.length?'':'<span class=muted>none yet — name a cluster below</span>')+
-  S.persons.map(p=>`<div class=card><b>${esc(p.name)}</b>
+  S.persons.map(p=>`<div class=card><b><a class=plink href="/person/${encodeURIComponent(p.name)}" title="open ${esc(p.name)}'s page">${esc(p.name)}</a></b>
    <span class=badge>${p.manual} confirmed</span><span class=badge>${p.auto} auto</span>
    <button onclick="togglePerson('${esc(p.name)}')">${openPerson===p.name?'hide':'show faces'}</button>
    <div id="pf-${esc(p.name)}"></div></div>`).join('');
@@ -442,7 +486,6 @@ async function loadPerson(name){const faces=await (await fetch('/api/person/'+en
  el.innerHTML='<div class=thumbs>'+faces.map(f=>`<span style="display:inline-block;text-align:center">
   ${img(f.id)}<br><span class=muted>${f.source==='manual'?'✓':(f.score*100|0)+'%'}</span>
   <button class=no title="not them" onclick='act({type:"reject",face_id:${f.id}})'>✗</button></span>`).join('')+'</div>'}
-function doExport(){const v=$('exportPath').value.trim();if(v)act({type:'export',out:v})}
 refresh();
 </script>"""
 
