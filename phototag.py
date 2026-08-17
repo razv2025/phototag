@@ -551,14 +551,19 @@ async function loadPerson(name){const faces=await (await fetch('/api/person/'+en
  el.innerHTML='<div class=thumbs>'+faces.map(f=>`<span style="display:inline-block;text-align:center">
   ${img(f.id)}<br><span class=muted>${f.source==='manual'?'✓':(f.score*100|0)+'%'}</span>
   <button class=no title="not them" onclick='act({type:"reject",face_id:${f.id}})'>✗</button></span>`).join('')+'</div>'}
-function cycle(name){filt[name]=filt[name]==='with'?'without':filt[name]==='without'?undefined:'with';
+function cycle(name){
+ filt[name]=exclusive?(filt[name]==='with'?undefined:'with')
+  :(filt[name]==='with'?'without':filt[name]==='without'?undefined:'with');
  if(!filt[name])delete filt[name];renderSearch();doSearch()}
+function exclChange(v){exclusive=v;
+ for(const n of Object.keys(filt))if(v&&filt[n]==='without')delete filt[n];
+ renderSearch();doSearch()}
 function renderSearch(){
  for(const n of Object.keys(filt))if(!S.persons.some(p=>p.name===n))delete filt[n];
- $('search').innerHTML='<h2>Search photos — click names to cycle: ✓ must appear → ✗ must not → off</h2>'+
+ $('search').innerHTML=`<h2>Search photos — click names to cycle: ✓ must appear${exclusive?'':' → ✗ must not'} → off</h2>`+
   (S.persons.length?
    `<label title="only the ✓ people are tagged, nobody else"><input type=checkbox
-     ${exclusive?'checked':''} onchange="exclusive=this.checked;doSearch()"> only them </label>`+
+     ${exclusive?'checked':''} onchange="exclChange(this.checked)"> only them </label>`+
    S.persons.map(p=>{const st=filt[p.name];
    return `<button class="${st==='with'?'ok':st==='without'?'no':''}"
     onclick='cycle(${esc(JSON.stringify(p.name))})'>${st==='with'?'✓ ':st==='without'?'✗ ':''}${esc(p.name)}</button>`}).join('')
