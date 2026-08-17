@@ -196,20 +196,28 @@ def reclassify(db, confident=CONFIDENT, borderline=BORDERLINE):
 
 
 def recluster(db):
-    """Group the still-unidentified faces so the user can name them in bulk."""
+    """Group the still-unidentified faces so the user can name them in bulk.
+
+    Faces that match no group (DBSCAN noise) become singleton clusters so
+    every detected face is visible and nameable in the UI."""
     from sklearn.cluster import DBSCAN
     db.execute("UPDATE faces SET cluster_id=NULL")
     rows = db.execute(
         "SELECT id FROM faces WHERE ignored=0 AND person IS NULL").fetchall()
     ids = [r["id"] for r in rows]
-    if len(ids) < 2:
+    if not ids:
         return
-    mat = load_embeddings(db, ids)
-    labels = DBSCAN(eps=0.5, min_samples=2, metric="cosine").fit_predict(mat)
+    if len(ids) == 1:
+        labels = np.array([0])
+    else:
+        mat = load_embeddings(db, ids)
+        labels = DBSCAN(eps=0.5, min_samples=2, metric="cosine").fit_predict(mat)
+    next_id = int(labels.max()) + 1
     for face_id, label in zip(ids, labels):
-        if label >= 0:
-            db.execute("UPDATE faces SET cluster_id=? WHERE id=?",
-                       (int(label), face_id))
+        if label < 0:
+            label, next_id = next_id, next_id + 1
+        db.execute("UPDATE faces SET cluster_id=? WHERE id=?",
+                   (int(label), face_id))
 
 
 # ---------------------------------------------------------------- export
@@ -277,17 +285,14 @@ def build_state(db):
     for r in db.execute("""
         SELECT cluster_id, COUNT(*) n FROM faces
         WHERE cluster_id IS NOT NULL AND ignored=0 AND person IS NULL
-        GROUP BY cluster_id ORDER BY n DESC LIMIT 40"""):
+        GROUP BY cluster_id ORDER BY n DESC LIMIT 200"""):
         samples = [x["id"] for x in db.execute(
             "SELECT id FROM faces WHERE cluster_id=? AND person IS NULL AND ignored=0 "
             "ORDER BY det_score DESC LIMIT 8", (r["cluster_id"],))]
         clusters.append({"id": r["cluster_id"], "size": r["n"], "samples": samples})
 
-    totals = db.execute("""
-        SELECT COUNT(*) faces, COUNT(DISTINCT photo_id) photos,
-               SUM(CASE WHEN person IS NULL AND ignored=0 AND cluster_id IS NULL
-                   THEN 1 ELSE 0 END) loose
-        FROM faces""").fetchone()
+    totals = db.execute("SELECT COUNT(*) faces, COUNT(DISTINCT photo_id) photos "
+                        "FROM faces").fetchone()
     return {"persons": sorted(persons.values(), key=lambda p: p["name"]),
             "review": review, "clusters": clusters, "totals": dict(totals)}
 
@@ -323,6 +328,29 @@ def cmd_serve(args):
         row = db.execute("SELECT p.path FROM faces f JOIN photos p ON p.id=f.photo_id "
                          "WHERE f.id=?", (face_id,)).fetchone()
         return send_file(row["path"])
+
+    @flask_app.get("/image/<int:photo_id>")
+    def image(photo_id):
+        row = db.execute("SELECT path FROM photos WHERE id=?",
+                         (photo_id,)).fetchone()
+        return send_file(row["path"])
+
+    @flask_app.get("/api/search")
+    def search():
+        want = set(request.args.getlist("with"))
+        avoid = set(request.args.getlist("without"))
+        with lock:
+            photos = {r["id"]: {"id": r["id"], "name": Path(r["path"]).name,
+                                "persons": set()}
+                      for r in db.execute("SELECT id, path FROM photos")}
+            for r in db.execute(
+                    "SELECT photo_id, person FROM faces WHERE ignored=0 AND "
+                    "person IS NOT NULL AND source IN ('manual','auto')"):
+                photos[r["photo_id"]]["persons"].add(r["person"])
+        out = [{**p, "persons": sorted(p["persons"])} for p in photos.values()
+               if want <= p["persons"] and not (avoid & p["persons"])]
+        out.sort(key=lambda p: p["name"])
+        return jsonify(out)
 
     @flask_app.get("/person/<name>")
     def person_page(name):
@@ -441,13 +469,14 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
  a.plink{color:#7ab8f5;text-decoration:none} a.plink:hover{text-decoration:underline}
 </style>
 <header><h1>phototag</h1><span id=stats class=muted></span></header>
+<section id=search></section>
 <section id=people></section>
 <section id=review class=review></section>
 <section id=clusters></section>
 <script>
-let S=null, openPerson=null;
+let S=null, openPerson=null, filt={};
 const $=id=>document.getElementById(id);
-const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify(a)})).json();
   render()}
@@ -456,6 +485,7 @@ function img(id){return `<img src="/thumb/${id}" onclick="window.open('/photo/${
 function personOptions(){return S.persons.map(p=>`<option>${esc(p.name)}</option>`).join('')}
 function render(){
  $('stats').textContent=`${S.totals.photos} photos · ${S.totals.faces} faces`;
+ renderSearch(); doSearch();
  $('people').innerHTML='<h2>People</h2>'+(S.persons.length?'':'<span class=muted>none yet — name a cluster below</span>')+
   S.persons.map(p=>`<div class=card><b><a class=plink href="/person/${encodeURIComponent(p.name)}" title="open ${esc(p.name)}'s page">${esc(p.name)}</a></b>
    <span class=badge>${p.manual} confirmed</span><span class=badge>${p.auto} auto</span>
@@ -470,10 +500,10 @@ function render(){
    <select id=as-${f.id}><option value="">someone else…</option>${personOptions()}</select>
    <button onclick='assignSel(${f.id})'>set</button>
    <button onclick='act({type:"ignore_face",face_id:${f.id}})'>ignore</button></div>`).join('');
- $('clusters').innerHTML='<h2>Unidentified clusters — name your targets, ignore the rest</h2>'+
+ $('clusters').innerHTML='<h2>Unnamed faces (most occurrences first) — name to get a personal page, or ignore</h2>'+
   (S.clusters.length?'':'<span class=muted>none</span>')+
   S.clusters.map(c=>`<div class=card><div class=thumbs>${c.samples.map(img).join('')}</div>
-   <div>${c.size} faces</div>
+   <div>${c.size} face${c.size>1?'s':''}</div>
    <input id=cn-${c.id} placeholder="person name">
    <button class=ok onclick='nameCluster(${c.id})'>Name</button>
    <button onclick='act({type:"ignore_cluster",cluster_id:${c.id}})'>Ignore</button></div>`).join('');
@@ -486,6 +516,23 @@ async function loadPerson(name){const faces=await (await fetch('/api/person/'+en
  el.innerHTML='<div class=thumbs>'+faces.map(f=>`<span style="display:inline-block;text-align:center">
   ${img(f.id)}<br><span class=muted>${f.source==='manual'?'✓':(f.score*100|0)+'%'}</span>
   <button class=no title="not them" onclick='act({type:"reject",face_id:${f.id}})'>✗</button></span>`).join('')+'</div>'}
+function cycle(name){filt[name]=filt[name]==='with'?'without':filt[name]==='without'?undefined:'with';
+ if(!filt[name])delete filt[name];renderSearch();doSearch()}
+function renderSearch(){
+ for(const n of Object.keys(filt))if(!S.persons.some(p=>p.name===n))delete filt[n];
+ $('search').innerHTML='<h2>Search photos — click names to cycle: ✓ must appear → ✗ must not → off</h2>'+
+  (S.persons.length?S.persons.map(p=>{const st=filt[p.name];
+   return `<button class="${st==='with'?'ok':st==='without'?'no':''}"
+    onclick='cycle(${esc(JSON.stringify(p.name))})'>${st==='with'?'✓ ':st==='without'?'✗ ':''}${esc(p.name)}</button>`}).join('')
+   +'<div id=sres></div>':'<span class=muted>name someone below first</span>')}
+async function doSearch(){if(!S.persons.length)return;
+ const q=new URLSearchParams();
+ for(const[n,s]of Object.entries(filt))q.append(s==='with'?'with':'without',n);
+ const res=await (await fetch('/api/search?'+q)).json();
+ const el=$('sres');if(!el)return;
+ el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
+  res.map(ph=>`<div class=card><img src="/image/${ph.id}" style="max-height:150px;max-width:280px;border-radius:6px;cursor:pointer" onclick="window.open('/image/${ph.id}')">
+   <div>${esc(ph.name)}<br>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('')}
 refresh();
 </script>"""
 
