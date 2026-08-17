@@ -370,6 +370,7 @@ def cmd_serve(args):
     def search():
         want = set(request.args.getlist("with"))
         avoid = set(request.args.getlist("without"))
+        exclusive = request.args.get("exclusive") == "1"
         with lock:
             autosync()
             photos = {r["id"]: {"id": r["id"], "name": Path(r["path"]).name,
@@ -380,7 +381,8 @@ def cmd_serve(args):
                     "person IS NOT NULL AND source IN ('manual','auto')"):
                 photos[r["photo_id"]]["persons"].add(r["person"])
         out = [{**p, "persons": sorted(p["persons"])} for p in photos.values()
-               if want <= p["persons"] and not (avoid & p["persons"])]
+               if (p["persons"] == want if exclusive else
+                   want <= p["persons"] and not (avoid & p["persons"]))]
         out.sort(key=lambda p: p["name"])
         return jsonify(out)
 
@@ -507,7 +509,7 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
 <section id=review class=review></section>
 <section id=clusters></section>
 <script>
-let S=null, openPerson=null, filt={};
+let S=null, openPerson=null, filt={}, exclusive=false;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
@@ -554,13 +556,17 @@ function cycle(name){filt[name]=filt[name]==='with'?'without':filt[name]==='with
 function renderSearch(){
  for(const n of Object.keys(filt))if(!S.persons.some(p=>p.name===n))delete filt[n];
  $('search').innerHTML='<h2>Search photos — click names to cycle: ✓ must appear → ✗ must not → off</h2>'+
-  (S.persons.length?S.persons.map(p=>{const st=filt[p.name];
+  (S.persons.length?
+   `<label title="only the ✓ people are tagged, nobody else"><input type=checkbox
+     ${exclusive?'checked':''} onchange="exclusive=this.checked;doSearch()"> only them </label>`+
+   S.persons.map(p=>{const st=filt[p.name];
    return `<button class="${st==='with'?'ok':st==='without'?'no':''}"
     onclick='cycle(${esc(JSON.stringify(p.name))})'>${st==='with'?'✓ ':st==='without'?'✗ ':''}${esc(p.name)}</button>`}).join('')
    +'<div id=sres></div>':'<span class=muted>name someone below first</span>')}
 async function doSearch(){if(!S.persons.length)return;
  const q=new URLSearchParams();
  for(const[n,s]of Object.entries(filt))q.append(s==='with'?'with':'without',n);
+ if(exclusive)q.append('exclusive','1');
  const res=await (await fetch('/api/search?'+q)).json();
  const el=$('sres');if(!el)return;
  el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
