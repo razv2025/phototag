@@ -565,6 +565,7 @@ async function refresh(){S=await (await fetch('/api/state')).json();render()}
 function img(id){return `<img src="/thumb/${id}" onclick="window.open('/photo/${id}')" title="click: full photo">`}
 function personOptions(){return S.persons.map(p=>`<option>${esc(p.name)}</option>`).join('')}
 function render(){
+ const y=scrollY;
  $('stats').textContent=`${S.totals.photos} photos · ${S.totals.faces} faces`;
  renderSearch(); doSearch();
  $('people').innerHTML='<h2>People</h2>'+(S.persons.length?'':'<span class=muted>none yet — name a cluster below</span>')+
@@ -588,6 +589,7 @@ function render(){
    <input id=cn-${c.id} placeholder="person name">
    <button class=ok onclick='nameCluster(${c.id})'>Name</button>
    <button onclick='act({type:"ignore_cluster",cluster_id:${c.id}})'>Ignore</button></div>`).join('');
+ scrollTo(0,y);
 }
 function nameCluster(id){const v=$('cn-'+id).value.trim();if(v)act({type:'name_cluster',cluster_id:id,name:v})}
 function assignSel(id){const v=$('as-'+id).value;if(v)act({type:'assign',face_id:id,name:v})}
@@ -622,9 +624,11 @@ async function doSearch(){if(!S.persons.length)return;
  if(exclusive)q.append('exclusive',exclusive);
  const res=await (await fetch('/api/search?'+q)).json();
  const el=$('sres');if(!el)return;
+ const y=scrollY;
  el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
   res.map(ph=>`<div class=card><img src="/image/${ph.id}" style="max-height:150px;max-width:280px;border-radius:6px;cursor:pointer" onclick="window.open('/image/${ph.id}')">
-   <div>${esc(ph.name)}<br>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('')}
+   <div>${esc(ph.name)}<br>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('');
+ scrollTo(0,y)}
 refresh();
 </script>"""
 
