@@ -220,6 +220,73 @@ def recluster(db):
                    (int(label), face_id))
 
 
+def parse_query(q):
+    """Parse a boolean person query — AND/OR/NOT (or &,|,!), parentheses,
+    implicit AND between adjacent names, "quoted names" for spaces.
+    Returns a predicate over a set of lowercased person names."""
+    import re
+    toks = re.findall(r'\(|\)|"[^"]*"|&&|\|\||[&|!]|[^\s()"&|!]+', q)
+    pos = 0
+
+    def peek():
+        return toks[pos] if pos < len(toks) else None
+
+    def eat():
+        nonlocal pos
+        pos += 1
+        return toks[pos - 1]
+
+    def kw(t):
+        if t is None:
+            return None
+        if t.upper() in ("AND", "OR", "NOT"):
+            return t.upper()
+        return {"&": "AND", "&&": "AND", "|": "OR", "||": "OR", "!": "NOT"}.get(t)
+
+    def expr():
+        node = term()
+        while kw(peek()) == "OR":
+            eat()
+            node = (lambda l, r: lambda s: l(s) or r(s))(node, term())
+        return node
+
+    def term():
+        node = factor()
+        while True:
+            t = peek()
+            if kw(t) == "AND":
+                eat()
+            elif t is None or t == ")" or kw(t) == "OR":
+                break
+            node = (lambda l, r: lambda s: l(s) and r(s))(node, factor())
+        return node
+
+    def factor():
+        t = peek()
+        if t is None:
+            raise ValueError("query ended unexpectedly")
+        if kw(t) == "NOT":
+            eat()
+            f = factor()
+            return lambda s: not f(s)
+        if t == "(":
+            eat()
+            node = expr()
+            if peek() != ")":
+                raise ValueError("missing closing parenthesis")
+            eat()
+            return node
+        if t == ")":
+            raise ValueError("unexpected closing parenthesis")
+        name = eat().strip('"').lower()
+        return lambda s, n=name: n in s
+
+    node = expr()
+    if pos != len(toks):
+        raise ValueError(f"unexpected token: {toks[pos]}")
+    return node
+
+
 # ---------------------------------------------------------------- export
 
 def export_links(db, out_dir: Path, copy=False):
@@ -337,8 +404,7 @@ def cmd_serve(args):
 
     @flask_app.get("/api/search")
     def search():
-        want = set(request.args.getlist("with"))
-        avoid = set(request.args.getlist("without"))
+        q = request.args.get("q", "").strip()
         with lock:
             photos = {r["id"]: {"id": r["id"], "name": Path(r["path"]).name,
                                 "persons": set()}
@@ -347,9 +413,17 @@ def cmd_serve(args):
                     "SELECT photo_id, person FROM faces WHERE ignored=0 AND "
                     "person IS NOT NULL AND source IN ('manual','auto')"):
                 photos[r["photo_id"]]["persons"].add(r["person"])
-        out = [{**p, "persons": sorted(p["persons"])} for p in photos.values()
-               if want <= p["persons"] and not (avoid & p["persons"])]
-        out.sort(key=lambda p: p["name"])
+        if q:
+            try:
+                match = parse_query(q)
+            except ValueError as e:
+                return jsonify({"error": f"bad query: {e}"}), 400
+            hits = [p for p in photos.values()
+                    if match({n.lower() for n in p["persons"]})]
+        else:
+            hits = list(photos.values())
+        out = sorted(({**p, "persons": sorted(p["persons"])} for p in hits),
+                     key=lambda p: p["name"])
         return jsonify(out)
 
     @flask_app.get("/person/<name>")
@@ -474,7 +548,7 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
 <section id=review class=review></section>
 <section id=clusters></section>
 <script>
-let S=null, openPerson=null, filt={};
+let S=null, openPerson=null, qstr='';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
@@ -516,20 +590,23 @@ async function loadPerson(name){const faces=await (await fetch('/api/person/'+en
  el.innerHTML='<div class=thumbs>'+faces.map(f=>`<span style="display:inline-block;text-align:center">
   ${img(f.id)}<br><span class=muted>${f.source==='manual'?'✓':(f.score*100|0)+'%'}</span>
   <button class=no title="not them" onclick='act({type:"reject",face_id:${f.id}})'>✗</button></span>`).join('')+'</div>'}
-function cycle(name){filt[name]=filt[name]==='with'?'without':filt[name]==='without'?undefined:'with';
- if(!filt[name])delete filt[name];renderSearch();doSearch()}
 function renderSearch(){
- for(const n of Object.keys(filt))if(!S.persons.some(p=>p.name===n))delete filt[n];
- $('search').innerHTML='<h2>Search photos — click names to cycle: ✓ must appear → ✗ must not → off</h2>'+
-  (S.persons.length?S.persons.map(p=>{const st=filt[p.name];
-   return `<button class="${st==='with'?'ok':st==='without'?'no':''}"
-    onclick='cycle(${esc(JSON.stringify(p.name))})'>${st==='with'?'✓ ':st==='without'?'✗ ':''}${esc(p.name)}</button>`}).join('')
+ $('search').innerHTML='<h2>Search photos — AND / OR / NOT and parentheses, e.g. (Bibi OR Ganz) AND NOT Bittan</h2>'+
+  (S.persons.length?
+   `<input id=q size=46 placeholder="query…" value="${esc(qstr)}"
+     oninput="qstr=this.value" onkeydown="if(event.key==='Enter')doSearch()">
+    <button class=ok onclick="doSearch()">Search</button>
+    <button onclick="qstr='';doSearch()">Clear</button> `+
+   S.persons.map(p=>`<button title="add to query"
+    onclick='addName(${esc(JSON.stringify(p.name))})'>+ ${esc(p.name)}</button>`).join('')
    +'<div id=sres></div>':'<span class=muted>name someone below first</span>')}
+function addName(n){if(/\\s/.test(n))n='"'+n+'"';
+ qstr=(qstr.trim()?qstr.trim()+' AND ':'')+n;renderSearch();doSearch()}
 async function doSearch(){if(!S.persons.length)return;
- const q=new URLSearchParams();
- for(const[n,s]of Object.entries(filt))q.append(s==='with'?'with':'without',n);
- const res=await (await fetch('/api/search?'+q)).json();
+ const el0=$('q');if(el0)el0.value=qstr;
+ const res=await (await fetch('/api/search?q='+encodeURIComponent(qstr))).json();
  const el=$('sres');if(!el)return;
+ if(res.error){el.innerHTML=`<div style="color:#e07a7a;margin:6px 0">${esc(res.error)}</div>`;return}
  el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
   res.map(ph=>`<div class=card><img src="/image/${ph.id}" style="max-height:150px;max-width:280px;border-radius:6px;cursor:pointer" onclick="window.open('/image/${ph.id}')">
    <div>${esc(ph.name)}<br>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('')}
