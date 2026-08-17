@@ -562,6 +562,13 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
  .pcard img{width:100%;height:140px;object-fit:cover;border-radius:6px;cursor:pointer;display:block}
  .fname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 3px;color:#9ab;font-size:12px}
  .pcard .badge{margin:0 4px 3px 0;display:inline-block}
+ .ccard{display:flex;gap:10px;align-items:flex-start;max-width:560px}
+ .ccard .thumbs{flex:1;min-width:0}
+ .cbtns{display:flex;flex-direction:column;gap:3px;width:140px;flex-shrink:0}
+ .cbtns button{width:100%;margin:0}
+ .cbtns input{width:100%;box-sizing:border-box;margin:2px 0}
+ .taglist{max-height:150px;overflow:auto;display:flex;flex-direction:column;gap:2px}
+ .taglist button{text-align:left}
 </style>
 <header><h1>phototag</h1><span id=stats class=muted></span></header>
 <section id=search></section>
@@ -598,13 +605,24 @@ function render(){
    <button onclick='act({type:"ignore_face",face_id:${f.id}})'>ignore</button></div>`).join('');
  $('clusters').innerHTML='<h2>Unnamed faces (most occurrences first) — name to get a personal page, or ignore</h2>'+
   (S.clusters.length?'':'<span class=muted>none</span>')+
-  S.clusters.map(c=>`<div class=card><div class=thumbs>${c.samples.map(img).join('')}</div>
-   <div>${c.size} face${c.size>1?'s':''}</div>
-   <input id=cn-${c.id} placeholder="person name">
-   <button class=ok onclick='nameCluster(${c.id})'>Name</button>
-   <button onclick='act({type:"ignore_cluster",cluster_id:${c.id}})'>Ignore</button></div>`).join('');
+  S.clusters.map(c=>`<div class="card ccard"><div class=thumbs>${c.samples.map(img).join('')}</div>
+   <div class=cbtns><div class=muted>${c.size} face${c.size>1?'s':''}</div>
+    <button onclick='act({type:"ignore_cluster",cluster_id:${c.id}})'>Ignore</button>
+    <button class=ok onclick='showName(${c.id})'>Name</button>
+    <button onclick='showTag(${c.id})'>Tag</button>
+    <div id=cx-${c.id}></div></div></div>`).join('');
  scrollTo(0,y);
 }
+function showName(id){$('cx-'+id).innerHTML=
+ `<input id=cn-${id} placeholder="new name" onkeydown="if(event.key==='Enter')nameCluster(${id})">
+  <button class=ok onclick='nameCluster(${id})'>OK</button>`;$('cn-'+id).focus()}
+function showTag(id){$('cx-'+id).innerHTML=
+ `<input id=ct-${id} placeholder="search people…" oninput='filterTag(${id})'>
+  <div class=taglist id=tl-${id}></div>`;filterTag(id);$('ct-'+id).focus()}
+function filterTag(id){const q=$('ct-'+id).value.trim().toLowerCase();
+ $('tl-'+id).innerHTML=S.persons.filter(p=>p.name.toLowerCase().includes(q))
+  .map(p=>`<button onclick='act({type:"name_cluster",cluster_id:${id},name:${esc(JSON.stringify(p.name))}})'>${esc(p.name)}</button>`)
+  .join('')||'<span class=muted>no match</span>'}
 function nameCluster(id){const v=$('cn-'+id).value.trim();if(v)act({type:'name_cluster',cluster_id:id,name:v})}
 function assignSel(id){const v=$('as-'+id).value;if(v)act({type:'assign',face_id:id,name:v})}
 function togglePerson(name){openPerson=openPerson===name?null:name;render()}
