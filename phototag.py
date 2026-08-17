@@ -427,8 +427,9 @@ def cmd_serve(args):
                      else f"{int(ph['score'] * 100)}% match")
             cards.append(
                 f'<div class=card><a href="/photo/{ph["face_id"]}" target=_blank>'
-                f'<img src="/photo/{ph["face_id"]}"></a>'
-                f'<div class=cap>{fname} <span class=badge>{badge}</span></div></div>')
+                f'<img src="/photo/{ph["face_id"]}" loading=lazy></a>'
+                f'<div class=cap title="{fname}">{fname}</div>'
+                f'<span class=badge>{badge}</span></div>')
         return (PERSON_PAGE
                 .replace("__NAME__", html_mod.escape(name))
                 .replace("__COUNT__", str(len(photos)))
@@ -503,10 +504,13 @@ PERSON_PAGE = """<!doctype html><meta charset="utf-8"><title>__NAME__ — photot
  header{position:sticky;top:0;background:#1a2027;padding:10px 16px;display:flex;
         gap:16px;align-items:center;box-shadow:0 1px 4px #0008}
  h1{font-size:16px;margin:0} a{color:#7ab8f5;text-decoration:none} .muted{color:#889}
- section{padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px}
- .card{background:#1a2027;border-radius:10px;padding:8px;max-width:340px}
- .card img{max-height:240px;max-width:320px;border-radius:6px;display:block}
- .cap{margin-top:6px;word-break:break-all}
+ section{padding:12px 16px;display:grid;gap:10px;
+         grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+ .card{background:#1a2027;border-radius:10px;padding:8px;min-width:0}
+ .card img{width:100%;height:180px;object-fit:cover;border-radius:6px;display:block}
+ .cap{margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+      color:#9ab;font-size:12px}
+ .badge{white-space:nowrap}
  .badge{font-size:11px;background:#2b3542;border-radius:4px;padding:1px 6px;margin-left:6px}
 </style>
 <header><a href="/">← all people</a>
@@ -548,6 +552,11 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
         padding:5px 8px} .score{color:#8fb573;font-weight:600}
  .badge{font-size:11px;background:#2b3542;border-radius:4px;padding:1px 6px;margin-left:6px}
  a.plink{color:#7ab8f5;text-decoration:none} a.plink:hover{text-decoration:underline}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-top:8px}
+ .pcard{background:#1a2027;border-radius:10px;padding:8px;min-width:0}
+ .pcard img{width:100%;height:140px;object-fit:cover;border-radius:6px;cursor:pointer;display:block}
+ .fname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 3px;color:#9ab;font-size:12px}
+ .pcard .badge{margin:0 4px 3px 0;display:inline-block}
 </style>
 <header><h1>phototag</h1><span id=stats class=muted></span></header>
 <section id=search></section>
@@ -625,9 +634,10 @@ async function doSearch(){if(!S.persons.length)return;
  const res=await (await fetch('/api/search?'+q)).json();
  const el=$('sres');if(!el)return;
  const y=scrollY;
- el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
-  res.map(ph=>`<div class=card><img src="/image/${ph.id}" style="max-height:150px;max-width:280px;border-radius:6px;cursor:pointer" onclick="window.open('/image/${ph.id}')">
-   <div>${esc(ph.name)}<br>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('');
+ el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div><div class=grid>`+
+  res.map(ph=>`<div class=pcard><img src="/image/${ph.id}" loading=lazy onclick="window.open('/image/${ph.id}')">
+   <div class=fname title="${esc(ph.name)}">${esc(ph.name)}</div>
+   <div>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('')+'</div>';
  scrollTo(0,y)}
 refresh();
 </script>"""
