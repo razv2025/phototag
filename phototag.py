@@ -370,20 +370,35 @@ def cmd_serve(args):
     def search():
         want = set(request.args.getlist("with"))
         avoid = set(request.args.getlist("without"))
-        exclusive = request.args.get("exclusive") == "1"
+        mode = request.args.get("exclusive")  # 'strict' | 'named' | None
         with lock:
             autosync()
             photos = {r["id"]: {"id": r["id"], "name": Path(r["path"]).name,
                                 "persons": set()}
                       for r in db.execute("SELECT id, path FROM photos")}
-            for r in db.execute(
-                    "SELECT photo_id, person FROM faces WHERE ignored=0 AND "
-                    "person IS NOT NULL AND source IN ('manual','auto')"):
-                photos[r["photo_id"]]["persons"].add(r["person"])
-        out = [{**p, "persons": sorted(p["persons"])} for p in photos.values()
-               if (bool(want) and p["persons"] == want if exclusive else
-                   want <= p["persons"] and not (avoid & p["persons"]))]
-        out.sort(key=lambda p: p["name"])
+            n_faces, n_want = {}, {}  # per photo: all detected faces / ✓-tagged
+            for r in db.execute("SELECT photo_id, person, source, ignored FROM faces"):
+                pid = r["photo_id"]
+                n_faces[pid] = n_faces.get(pid, 0) + 1
+                if (not r["ignored"] and r["person"]
+                        and r["source"] in ("manual", "auto")):
+                    photos[pid]["persons"].add(r["person"])
+                    if r["person"] in want:
+                        n_want[pid] = n_want.get(pid, 0) + 1
+
+        def ok(p):
+            if mode:  # exactly the ✓ people...
+                if not want or p["persons"] != want:
+                    return False
+                if mode != "strict":  # 'named': unnamed extra faces are fine
+                    return True
+                # 'strict': every detected face must be one of the ✓ people
+                return n_want.get(p["id"], 0) == n_faces.get(p["id"], 0)
+            return want <= p["persons"] and not (avoid & p["persons"])
+
+        out = sorted(({**p, "persons": sorted(p["persons"])}
+                      for p in photos.values() if ok(p)),
+                     key=lambda p: p["name"])
         return jsonify(out)
 
     @flask_app.get("/person/<name>")
@@ -509,7 +524,7 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
 <section id=review class=review></section>
 <section id=clusters></section>
 <script>
-let S=null, openPerson=null, filt={}, exclusive=false;
+let S=null, openPerson=null, filt={}, exclusive='';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
@@ -555,15 +570,17 @@ function cycle(name){
  filt[name]=exclusive?(filt[name]==='with'?undefined:'with')
   :(filt[name]==='with'?'without':filt[name]==='without'?undefined:'with');
  if(!filt[name])delete filt[name];renderSearch();doSearch()}
-function exclChange(v){exclusive=v;
- for(const n of Object.keys(filt))if(v&&filt[n]==='without')delete filt[n];
+function exclChange(m,v){exclusive=v?m:'';
+ if(exclusive)for(const n of Object.keys(filt))if(filt[n]==='without')delete filt[n];
  renderSearch();doSearch()}
 function renderSearch(){
  for(const n of Object.keys(filt))if(!S.persons.some(p=>p.name===n))delete filt[n];
  $('search').innerHTML=`<h2>Search photos — click names to cycle: ✓ must appear${exclusive?'':' → ✗ must not'} → off</h2>`+
   (S.persons.length?
-   `<label title="only the ✓ people are tagged, nobody else"><input type=checkbox
-     ${exclusive?'checked':''} onchange="exclChange(this.checked)"> only them </label>`+
+   `<label title="nobody else is on the photo at all — even unnamed faces"><input type=checkbox
+     ${exclusive==='strict'?'checked':''} onchange="exclChange('strict',this.checked)"> only them </label>
+    <label title="no other named person; unnamed faces may still appear"><input type=checkbox
+     ${exclusive==='named'?'checked':''} onchange="exclChange('named',this.checked)"> only these named </label>`+
    S.persons.map(p=>{const st=filt[p.name];
    return `<button class="${st==='with'?'ok':st==='without'?'no':''}"
     onclick='cycle(${esc(JSON.stringify(p.name))})'>${st==='with'?'✓ ':st==='without'?'✗ ':''}${esc(p.name)}</button>`}).join('')
@@ -571,7 +588,7 @@ function renderSearch(){
 async function doSearch(){if(!S.persons.length)return;
  const q=new URLSearchParams();
  for(const[n,s]of Object.entries(filt))q.append(s==='with'?'with':'without',n);
- if(exclusive)q.append('exclusive','1');
+ if(exclusive)q.append('exclusive',exclusive);
  const res=await (await fetch('/api/search?'+q)).json();
  const el=$('sres');if(!el)return;
  el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
