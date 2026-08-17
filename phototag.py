@@ -48,6 +48,7 @@ def open_db(data_dir: Path) -> sqlite3.Connection:
             ignored INTEGER DEFAULT 0, cluster_id INTEGER);
         CREATE TABLE IF NOT EXISTS rejections(
             face_id INTEGER, person TEXT, UNIQUE(face_id, person));
+        CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
     """)
     return db
 
@@ -64,69 +65,82 @@ def load_embeddings(db, face_ids):
 
 # ---------------------------------------------------------------- scan
 
-def cmd_scan(args):
-    import cv2
+def load_face_app():
     from insightface.app import FaceAnalysis
-
-    root = Path(args.photos_dir).expanduser().resolve()
-    if not root.is_dir():
-        sys.exit(f"not a directory: {root}")
-    data_dir = Path(args.data)
-    db = open_db(data_dir)
-
     print("Loading face model (first run downloads ~300MB)...")
     # Keep the model inside the project folder instead of ~/.insightface
     app = FaceAnalysis(name="buffalo_l", root=str(Path(__file__).resolve().parent),
                        providers=["CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(640, 640))
+    return app
 
-    # Drop photos that disappeared from disk.
+
+def sync_corpus(db, data_dir, root, get_app, verbose=False):
+    """Bring the face index in line with the photo folder: drop deleted
+    photos, (re)scan new or modified ones. Cheap no-op when nothing changed.
+    Returns (changed_photos, new_faces)."""
+    changed = 0
     for row in db.execute("SELECT id, path FROM photos").fetchall():
         if not Path(row["path"]).exists():
             db.execute("DELETE FROM faces WHERE photo_id=?", (row["id"],))
             db.execute("DELETE FROM photos WHERE id=?", (row["id"],))
-    db.commit()
-
-    paths = sorted(p for p in root.rglob("*")
-                   if p.suffix.lower() in IMAGE_EXTS and p.is_file())
-    print(f"{len(paths)} images under {root}")
-    known = {r["path"]: r["mtime"] for r in db.execute("SELECT path, mtime FROM photos")}
-
+            changed += 1
+    known = {r["path"]: r["mtime"]
+             for r in db.execute("SELECT path, mtime FROM photos")}
+    todo = [p for p in sorted(root.rglob("*"))
+            if p.suffix.lower() in IMAGE_EXTS and p.is_file()
+            and known.get(str(p)) != p.stat().st_mtime]
     new_faces = 0
-    for i, path in enumerate(paths, 1):
-        mtime = path.stat().st_mtime
-        if known.get(str(path)) == mtime:
-            continue
-        img = cv2.imread(str(path))
-        if img is None:  # formats OpenCV can't decode (e.g. avif) — try Pillow
-            try:
-                from PIL import Image
-                img = cv2.cvtColor(np.asarray(Image.open(path).convert("RGB")),
-                                   cv2.COLOR_RGB2BGR)
-            except Exception:
-                img = None
-        if img is None:
-            print(f"  ! unreadable, skipped: {path}")
-            continue
-        db.execute("DELETE FROM faces WHERE photo_id IN "
-                   "(SELECT id FROM photos WHERE path=?)", (str(path),))
-        db.execute("INSERT INTO photos(path, mtime) VALUES(?,?) "
-                   "ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime",
-                   (str(path), mtime))
-        photo_id = db.execute("SELECT id FROM photos WHERE path=?",
-                              (str(path),)).fetchone()["id"]
-        for face in app.get(img):
-            x1, y1, x2, y2 = face.bbox.astype(int)
-            if face.det_score < MIN_DET_SCORE or min(x2 - x1, y2 - y1) < MIN_FACE_PX:
+    if todo:
+        import cv2
+        app = get_app()
+        for i, path in enumerate(todo, 1):
+            img = cv2.imread(str(path))
+            if img is None:  # formats OpenCV can't decode (e.g. avif) — try Pillow
+                try:
+                    from PIL import Image
+                    img = cv2.cvtColor(np.asarray(Image.open(path).convert("RGB")),
+                                       cv2.COLOR_RGB2BGR)
+                except Exception:
+                    img = None
+            if img is None:
+                if verbose:
+                    print(f"  ! unreadable, skipped: {path}")
                 continue
-            emb = face.normed_embedding.astype(np.float32)
-            cur = db.execute(
-                "INSERT INTO faces(photo_id, emb, det_score) VALUES(?,?,?)",
-                (photo_id, emb.tobytes(), float(face.det_score)))
-            save_thumb(data_dir, cur.lastrowid, img, (x1, y1, x2, y2))
-            new_faces += 1
-        db.commit()
-        print(f"  [{i}/{len(paths)}] {path.name}")
+            db.execute("DELETE FROM faces WHERE photo_id IN "
+                       "(SELECT id FROM photos WHERE path=?)", (str(path),))
+            db.execute("INSERT INTO photos(path, mtime) VALUES(?,?) "
+                       "ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime",
+                       (str(path), path.stat().st_mtime))
+            photo_id = db.execute("SELECT id FROM photos WHERE path=?",
+                                  (str(path),)).fetchone()["id"]
+            for face in app.get(img):
+                x1, y1, x2, y2 = face.bbox.astype(int)
+                if (face.det_score < MIN_DET_SCORE
+                        or min(x2 - x1, y2 - y1) < MIN_FACE_PX):
+                    continue
+                emb = face.normed_embedding.astype(np.float32)
+                cur = db.execute(
+                    "INSERT INTO faces(photo_id, emb, det_score) VALUES(?,?,?)",
+                    (photo_id, emb.tobytes(), float(face.det_score)))
+                save_thumb(data_dir, cur.lastrowid, img, (x1, y1, x2, y2))
+                new_faces += 1
+            if verbose:
+                print(f"  [{i}/{len(todo)}] {path.name}")
+    db.commit()
+    return changed + len(todo), new_faces
+
+
+def cmd_scan(args):
+    root = Path(args.photos_dir).expanduser().resolve()
+    if not root.is_dir():
+        sys.exit(f"not a directory: {root}")
+    data_dir = Path(args.data)
+    db = open_db(data_dir)
+    # Remember the folder so `serve` can auto-sync it on every page hit.
+    db.execute("INSERT INTO meta VALUES('root',?) ON CONFLICT(key) "
+               "DO UPDATE SET value=excluded.value", (str(root),))
+    _, new_faces = sync_corpus(db, data_dir, root, load_face_app, verbose=True)
 
     reclassify(db)
     recluster(db)
@@ -220,73 +234,6 @@ def recluster(db):
                    (int(label), face_id))
 
 
-def parse_query(q):
-    """Parse a boolean person query — AND/OR/NOT (or &,|,!), parentheses,
-    implicit AND between adjacent names, "quoted names" for spaces.
-    Returns a predicate over a set of lowercased person names."""
-    import re
-    toks = re.findall(r'\(|\)|"[^"]*"|&&|\|\||[&|!]|[^\s()"&|!]+', q)
-    pos = 0
-
-    def peek():
-        return toks[pos] if pos < len(toks) else None
-
-    def eat():
-        nonlocal pos
-        pos += 1
-        return toks[pos - 1]
-
-    def kw(t):
-        if t is None:
-            return None
-        if t.upper() in ("AND", "OR", "NOT"):
-            return t.upper()
-        return {"&": "AND", "&&": "AND", "|": "OR", "||": "OR", "!": "NOT"}.get(t)
-
-    def expr():
-        node = term()
-        while kw(peek()) == "OR":
-            eat()
-            node = (lambda l, r: lambda s: l(s) or r(s))(node, term())
-        return node
-
-    def term():
-        node = factor()
-        while True:
-            t = peek()
-            if kw(t) == "AND":
-                eat()
-            elif t is None or t == ")" or kw(t) == "OR":
-                break
-            node = (lambda l, r: lambda s: l(s) and r(s))(node, factor())
-        return node
-
-    def factor():
-        t = peek()
-        if t is None:
-            raise ValueError("query ended unexpectedly")
-        if kw(t) == "NOT":
-            eat()
-            f = factor()
-            return lambda s: not f(s)
-        if t == "(":
-            eat()
-            node = expr()
-            if peek() != ")":
-                raise ValueError("missing closing parenthesis")
-            eat()
-            return node
-        if t == ")":
-            raise ValueError("unexpected closing parenthesis")
-        name = eat().strip('"').lower()
-        return lambda s, n=name: n in s
-
-    node = expr()
-    if pos != len(toks):
-        raise ValueError(f"unexpected token: {toks[pos]}")
-    return node
-
-
 # ---------------------------------------------------------------- export
 
 def export_links(db, out_dir: Path, copy=False):
@@ -377,6 +324,22 @@ def cmd_serve(args):
         recluster(db)
         db.commit()
 
+    face_app = []  # lazy singleton — only loaded if new photos appear
+
+    def get_app():
+        if not face_app:
+            face_app.append(load_face_app())
+        return face_app[0]
+
+    def autosync():
+        """Pick up added/changed/removed photos on every data request."""
+        row = db.execute("SELECT value FROM meta WHERE key='root'").fetchone()
+        if not row or not Path(row["value"]).is_dir():
+            return
+        changed, _ = sync_corpus(db, data_dir, Path(row["value"]), get_app)
+        if changed:
+            refresh()
+
     @flask_app.get("/")
     def index():
         return PAGE
@@ -384,6 +347,7 @@ def cmd_serve(args):
     @flask_app.get("/api/state")
     def state():
         with lock:
+            autosync()
             return jsonify(build_state(db))
 
     @flask_app.get("/thumb/<int:face_id>")
@@ -404,8 +368,10 @@ def cmd_serve(args):
 
     @flask_app.get("/api/search")
     def search():
-        q = request.args.get("q", "").strip()
+        want = set(request.args.getlist("with"))
+        avoid = set(request.args.getlist("without"))
         with lock:
+            autosync()
             photos = {r["id"]: {"id": r["id"], "name": Path(r["path"]).name,
                                 "persons": set()}
                       for r in db.execute("SELECT id, path FROM photos")}
@@ -413,23 +379,16 @@ def cmd_serve(args):
                     "SELECT photo_id, person FROM faces WHERE ignored=0 AND "
                     "person IS NOT NULL AND source IN ('manual','auto')"):
                 photos[r["photo_id"]]["persons"].add(r["person"])
-        if q:
-            try:
-                match = parse_query(q)
-            except ValueError as e:
-                return jsonify({"error": f"bad query: {e}"}), 400
-            hits = [p for p in photos.values()
-                    if match({n.lower() for n in p["persons"]})]
-        else:
-            hits = list(photos.values())
-        out = sorted(({**p, "persons": sorted(p["persons"])} for p in hits),
-                     key=lambda p: p["name"])
+        out = [{**p, "persons": sorted(p["persons"])} for p in photos.values()
+               if want <= p["persons"] and not (avoid & p["persons"])]
+        out.sort(key=lambda p: p["name"])
         return jsonify(out)
 
     @flask_app.get("/person/<name>")
     def person_page(name):
         import html as html_mod
         with lock:
+            autosync()
             rows = db.execute("""
                 SELECT f.id face_id, f.source, f.score, p.id photo_id, p.path
                 FROM faces f JOIN photos p ON p.id=f.photo_id
@@ -548,7 +507,7 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
 <section id=review class=review></section>
 <section id=clusters></section>
 <script>
-let S=null, openPerson=null, qstr='';
+let S=null, openPerson=null, filt={};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
@@ -590,23 +549,20 @@ async function loadPerson(name){const faces=await (await fetch('/api/person/'+en
  el.innerHTML='<div class=thumbs>'+faces.map(f=>`<span style="display:inline-block;text-align:center">
   ${img(f.id)}<br><span class=muted>${f.source==='manual'?'✓':(f.score*100|0)+'%'}</span>
   <button class=no title="not them" onclick='act({type:"reject",face_id:${f.id}})'>✗</button></span>`).join('')+'</div>'}
+function cycle(name){filt[name]=filt[name]==='with'?'without':filt[name]==='without'?undefined:'with';
+ if(!filt[name])delete filt[name];renderSearch();doSearch()}
 function renderSearch(){
- $('search').innerHTML='<h2>Search photos — AND / OR / NOT and parentheses, e.g. (Bibi OR Ganz) AND NOT Bittan</h2>'+
-  (S.persons.length?
-   `<input id=q size=46 placeholder="query…" value="${esc(qstr)}"
-     oninput="qstr=this.value" onkeydown="if(event.key==='Enter')doSearch()">
-    <button class=ok onclick="doSearch()">Search</button>
-    <button onclick="qstr='';doSearch()">Clear</button> `+
-   S.persons.map(p=>`<button title="add to query"
-    onclick='addName(${esc(JSON.stringify(p.name))})'>+ ${esc(p.name)}</button>`).join('')
+ for(const n of Object.keys(filt))if(!S.persons.some(p=>p.name===n))delete filt[n];
+ $('search').innerHTML='<h2>Search photos — click names to cycle: ✓ must appear → ✗ must not → off</h2>'+
+  (S.persons.length?S.persons.map(p=>{const st=filt[p.name];
+   return `<button class="${st==='with'?'ok':st==='without'?'no':''}"
+    onclick='cycle(${esc(JSON.stringify(p.name))})'>${st==='with'?'✓ ':st==='without'?'✗ ':''}${esc(p.name)}</button>`}).join('')
    +'<div id=sres></div>':'<span class=muted>name someone below first</span>')}
-function addName(n){if(/\\s/.test(n))n='"'+n+'"';
- qstr=(qstr.trim()?qstr.trim()+' AND ':'')+n;renderSearch();doSearch()}
 async function doSearch(){if(!S.persons.length)return;
- const el0=$('q');if(el0)el0.value=qstr;
- const res=await (await fetch('/api/search?q='+encodeURIComponent(qstr))).json();
+ const q=new URLSearchParams();
+ for(const[n,s]of Object.entries(filt))q.append(s==='with'?'with':'without',n);
+ const res=await (await fetch('/api/search?'+q)).json();
  const el=$('sres');if(!el)return;
- if(res.error){el.innerHTML=`<div style="color:#e07a7a;margin:6px 0">${esc(res.error)}</div>`;return}
  el.innerHTML=`<div class=muted style="margin:6px 0">${res.length} matching photos</div>`+
   res.map(ph=>`<div class=card><img src="/image/${ph.id}" style="max-height:150px;max-width:280px;border-radius:6px;cursor:pointer" onclick="window.open('/image/${ph.id}')">
    <div>${esc(ph.name)}<br>${ph.persons.map(n=>`<span class=badge>${esc(n)}</span>`).join('')||'<span class=muted>nobody tagged</span>'}</div></div>`).join('')}

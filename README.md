@@ -22,7 +22,7 @@ On Windows use `.venv\Scripts\pip` / `.venv\Scripts\python` instead of
 ## Usage
 
 ```bash
-# 1. Index all faces (JPG/PNG, recursive; cached — re-runs only touch new/changed photos)
+# 1. Index all faces (JPG/PNG/WebP/AVIF, recursive)
 .venv/bin/python phototag.py scan ~/path/to/photos
 
 # 2. Label & review in the browser (opens automatically);
@@ -38,9 +38,16 @@ On Windows use `.venv\Scripts\pip` / `.venv\Scripts\python` instead of
 The first `scan` downloads the face model (~300 MB) into `./models/` — one
 time only, after that everything works offline.
 
+Photos added to (or removed from) the folder later are picked up
+automatically on every page load — no need to re-run `scan`.
+
 ## The web UI
 
-- **Unidentified clusters** — groups of similar faces. Type a name on the
+- **Search photos** — click person names to cycle ✓ must appear → ✗ must
+  not appear → off; results update live (e.g. ✓X ✓Y ✗Z finds photos with
+  X and Y but without Z).
+- **Unnamed faces** — groups of similar faces, sorted by number of
+  occurrences (singletons included, so every detected face is here). Type a name on the
   clusters that are your targets; hit *Ignore* on everyone else. Naming a
   cluster makes those faces training exemplars and immediately re-classifies
   the whole corpus.
