@@ -562,9 +562,8 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
  .pcard img{width:100%;height:140px;object-fit:cover;border-radius:6px;cursor:pointer;display:block}
  .fname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 3px;color:#9ab;font-size:12px}
  .pcard .badge{margin:0 4px 3px 0;display:inline-block}
- .ccard{display:flex;gap:10px;align-items:flex-start;max-width:560px}
- .ccard .thumbs{flex:1;min-width:0}
- .cbtns{display:flex;flex-direction:column;gap:3px;width:140px;flex-shrink:0}
+ .ccard{display:inline-flex;gap:8px;align-items:flex-start;vertical-align:top}
+ .cbtns{display:flex;flex-direction:column;gap:3px;width:120px;flex-shrink:0}
  .cbtns button{width:100%;margin:0}
  .cbtns input{width:100%;box-sizing:border-box;margin:2px 0}
  .taglist{max-height:150px;overflow:auto;display:flex;flex-direction:column;gap:2px}
@@ -576,12 +575,12 @@ PAGE = """<!doctype html><meta charset="utf-8"><title>phototag</title>
 <section id=review class=review></section>
 <section id=clusters></section>
 <script>
-let S=null, openPerson=null, filt={}, exclusive='';
+let S=null, openPerson=null, filt={}, exclusive='', cx=null;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function act(a){S=await (await fetch('/api/action',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify(a)})).json();
-  render()}
+  cx=null;render()}
 async function refresh(){S=await (await fetch('/api/state')).json();render()}
 function img(id){return `<img src="/thumb/${id}" onclick="window.open('/photo/${id}')" title="click: full photo">`}
 function personOptions(){return S.persons.map(p=>`<option>${esc(p.name)}</option>`).join('')}
@@ -603,22 +602,39 @@ function render(){
    <select id=as-${f.id}><option value="">someone else…</option>${personOptions()}</select>
    <button onclick='assignSel(${f.id})'>set</button>
    <button onclick='act({type:"ignore_face",face_id:${f.id}})'>ignore</button></div>`).join('');
+ renderClusters(y);
+}
+function renderClusters(y){
+ if(y===undefined)y=scrollY;
  $('clusters').innerHTML='<h2>Unnamed faces (most occurrences first) — name to get a personal page, or ignore</h2>'+
   (S.clusters.length?'':'<span class=muted>none</span>')+
-  S.clusters.map(c=>`<div class="card ccard"><div class=thumbs>${c.samples.map(img).join('')}</div>
-   <div class=cbtns><div class=muted>${c.size} face${c.size>1?'s':''}</div>
-    <button onclick='act({type:"ignore_cluster",cluster_id:${c.id}})'>Ignore</button>
-    <button class=ok onclick='showName(${c.id})'>Name</button>
-    <button onclick='showTag(${c.id})'>Tag</button>
-    <div id=cx-${c.id}></div></div></div>`).join('');
+  S.clusters.map(c=>{
+   let right;
+   if(cx&&cx.id===c.id){
+    const back=`<button onclick='closeCx()' title=back>✗</button>`;
+    right=cx.mode==='name'
+     ?`${back}<input id=cn-${c.id} placeholder="new name" value="${esc(cx.v)}"
+        oninput="cx.v=this.value" onkeydown="if(event.key==='Enter')nameCluster(${c.id});else if(event.key==='Escape')closeCx()">
+       <button class=ok onclick='nameCluster(${c.id})'>OK</button>`
+     :`${back}<input id=ct-${c.id} placeholder="search people…" value="${esc(cx.v)}"
+        oninput='cx.v=this.value;filterTag(${c.id})' onkeydown="if(event.key==='Escape')closeCx()">
+       <div class=taglist id=tl-${c.id}></div>`;
+   }else{
+    right=`<button onclick='act({type:"ignore_cluster",cluster_id:${c.id}})'>Ignore</button>
+     <button class=ok onclick='openCx(${c.id},"name")'>Name</button>
+     <button onclick='openCx(${c.id},"tag")'>Tag</button>`;
+   }
+   return `<div class="card ccard"><div class=thumbs>${c.samples.map(img).join('')}</div>
+    <div class=cbtns><div class=muted>${c.size} face${c.size>1?'s':''}</div>${right}</div></div>`;
+  }).join('');
+ if(cx){const i=$((cx.mode==='name'?'cn-':'ct-')+cx.id);
+  if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}
+  if(cx.mode==='tag')filterTag(cx.id)}
  scrollTo(0,y);
 }
-function showName(id){$('cx-'+id).innerHTML=
- `<input id=cn-${id} placeholder="new name" onkeydown="if(event.key==='Enter')nameCluster(${id})">
-  <button class=ok onclick='nameCluster(${id})'>OK</button>`;$('cn-'+id).focus()}
-function showTag(id){$('cx-'+id).innerHTML=
- `<input id=ct-${id} placeholder="search people…" oninput='filterTag(${id})'>
-  <div class=taglist id=tl-${id}></div>`;filterTag(id);$('ct-'+id).focus()}
+function openCx(id,mode){cx={id,mode,v:''};renderClusters()}
+function closeCx(){cx=null;renderClusters()}
+document.addEventListener('click',e=>{if(cx&&!e.target.closest('.ccard'))closeCx()});
 function filterTag(id){const q=$('ct-'+id).value.trim().toLowerCase();
  $('tl-'+id).innerHTML=S.persons.filter(p=>p.name.toLowerCase().includes(q))
   .map(p=>`<button onclick='act({type:"name_cluster",cluster_id:${id},name:${esc(JSON.stringify(p.name))}})'>${esc(p.name)}</button>`)
