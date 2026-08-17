@@ -356,14 +356,17 @@ def cmd_serve(args):
 
     @flask_app.get("/photo/<int:face_id>")
     def photo(face_id):
-        row = db.execute("SELECT p.path FROM faces f JOIN photos p ON p.id=f.photo_id "
-                         "WHERE f.id=?", (face_id,)).fetchone()
+        with lock:
+            row = db.execute("SELECT p.path FROM faces f JOIN photos p "
+                             "ON p.id=f.photo_id WHERE f.id=?",
+                             (face_id,)).fetchone()
         return send_file(row["path"])
 
     @flask_app.get("/image/<int:photo_id>")
     def image(photo_id):
-        row = db.execute("SELECT path FROM photos WHERE id=?",
-                         (photo_id,)).fetchone()
+        with lock:  # the sqlite connection is shared across request threads
+            row = db.execute("SELECT path FROM photos WHERE id=?",
+                             (photo_id,)).fetchone()
         return send_file(row["path"])
 
     @flask_app.get("/api/search")
@@ -438,9 +441,11 @@ def cmd_serve(args):
 
     @flask_app.get("/api/person/<name>")
     def person_faces(name):
-        rows = db.execute(
-            "SELECT id, source, score FROM faces WHERE person=? AND ignored=0 "
-            "ORDER BY source='manual' DESC, score DESC LIMIT 200", (name,))
+        with lock:
+            rows = db.execute(
+                "SELECT id, source, score FROM faces WHERE person=? AND ignored=0 "
+                "ORDER BY source='manual' DESC, score DESC LIMIT 200",
+                (name,)).fetchall()
         return jsonify([dict(r) for r in rows])
 
     @flask_app.post("/api/rename")
